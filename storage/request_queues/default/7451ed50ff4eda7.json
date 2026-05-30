@@ -1,0 +1,16 @@
+{
+  "unique_key": "https://goszakupki.by/tenders/posted?tenderssearch%5bappeal%5d=&tenderssearch%5bauction_date_from%5d=&tenderssearch%5bauction_date_to%5d=&tenderssearch%5bcreated_from%5d=&tenderssearch%5bcreated_to%5d=&tenderssearch%5bcustomer_text%5d=&tenderssearch%5bfunds%5d=&tenderssearch%5bicegiasnum%5d=&tenderssearch%5bindustry%5d=&tenderssearch%5bnum%5d=&tenderssearch%5bparticipant_text%5d=&tenderssearch%5bprice_from%5d=&tenderssearch%5bprice_to%5d=&tenderssearch%5bregion%5d=&tenderssearch%5brequest_end_from%5d=&tenderssearch%5brequest_end_to%5d=&tenderssearch%5bstatus%5d=&tenderssearch%5btext%5d=%d0%92%d1%8b%d0%bd%d0%be%d1%81&tenderssearch%5btype%5d=&tenderssearch%5bunpparticipant%5d=&tenderssearch%5bunp%5d=",
+  "url": "https://goszakupki.by/tenders/posted?TendersSearch%5Btext%5D=%D0%92%D1%8B%D0%BD%D0%BE%D1%81&TendersSearch%5Bnum%5D=&TendersSearch%5BiceGiasNum%5D=&TendersSearch%5Bunp%5D=&TendersSearch%5Bcustomer_text%5D=&TendersSearch%5BunpParticipant%5D=&TendersSearch%5Bparticipant_text%5D=&TendersSearch%5Bprice_from%5D=&TendersSearch%5Bprice_to%5D=&TendersSearch%5Bcreated_from%5D=&TendersSearch%5Bcreated_to%5D=&TendersSearch%5Brequest_end_from%5D=&TendersSearch%5Brequest_end_to%5D=&TendersSearch%5Bauction_date_from%5D=&TendersSearch%5Bauction_date_to%5D=&TendersSearch%5Bindustry%5D=&TendersSearch%5Btype%5D=&TendersSearch%5Bstatus%5D=&TendersSearch%5Bregion%5D=&TendersSearch%5Bappeal%5D=&TendersSearch%5Bfunds%5D=",
+  "method": "GET",
+  "payload": null,
+  "headers": {},
+  "user_data": {
+    "__crawlee": {
+      "state": 4
+    }
+  },
+  "retry_count": 3,
+  "no_retry": false,
+  "loaded_url": null,
+  "handled_at": "2026-05-30 15:59:54.725724+00:00"
+}
