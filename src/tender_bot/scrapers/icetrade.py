@@ -102,6 +102,10 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
     except Exception:
         logger.exception("Failed to crawl icetrade.by for keyword '%s'", keyword)
 
+    # Enrich with detail page data
+    if tenders:
+        await _enrich_tenders_from_details(tenders)
+
     return tenders
 
 
@@ -195,3 +199,63 @@ async def _parse_link_list(
         except Exception:
             logger.exception("Error parsing icetrade link")
             continue
+
+
+async def _enrich_tenders_from_details(tenders: list[TenderItem]) -> None:
+    """Visit each tender's detail page to extract max_price, published_at, work_period."""
+    detail_crawler = create_stealth_crawler(max_requests=len(tenders) + 1)
+    url_to_tender: dict[str, TenderItem] = {t.url: t for t in tenders}
+    detail_urls = list(url_to_tender.keys())
+
+    @detail_crawler.router.default_handler
+    async def detail_handler(context: PlaywrightCrawlingContext) -> None:  # pyright: ignore[reportUnusedFunction]
+        page = context.page
+        current_url = page.url
+        await page.wait_for_load_state("networkidle", timeout=15000)
+
+        tender = url_to_tender.get(current_url)
+        if tender is None:
+            # Try matching by tender_id in URL
+            for _t_url, t_obj in url_to_tender.items():
+                if t_obj.tender_id in current_url:
+                    tender = t_obj
+                    break
+        if tender is None:
+            return
+
+        # icetrade.by detail page structure:
+        # - Table #main-info has main fields (org, dates, prices)
+        # - Table #lots-info has lot-specific fields (delivery period)
+        # We scan all rows for label-value pairs.
+        rows = await page.query_selector_all("table tr")
+        for row in rows:
+            cells = await row.query_selector_all("td, th")
+            if len(cells) < 2:
+                continue
+            label = (await cells[0].inner_text()).strip().lower()
+            value = (await cells[1].inner_text()).strip()
+            if not value:
+                continue
+
+            if "ориентировочная стоимость" in label or "предельная стоимость" in label:
+                tender.max_price = value
+            elif "дата размещения" in label and not tender.published_at:
+                tender.published_at = value
+            elif "окончания приема" in label and not tender.deadline:
+                tender.deadline = value
+            elif (
+                not tender.work_period
+                and any(
+                    kw in label
+                    for kw in (
+                        "срок поставки", "срок выполнения",
+                        "срок производства", "срок оказания",
+                    )
+                )
+            ):
+                tender.work_period = value
+
+    try:
+        await detail_crawler.run(detail_urls)
+    except Exception:
+        logger.exception("Failed to enrich icetrade tenders from detail pages")

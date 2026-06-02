@@ -62,10 +62,13 @@ async def scrape_goszakupki(keywords: list[str]) -> list[TenderItem]:
     return result
 
 
+
 async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
     """Scrape a single search results page."""
     tenders: list[TenderItem] = []
-    crawler = create_stealth_crawler(max_requests=1)
+    # We need extra requests for detail pages: 1 for list + N for details.
+    # Set a generous limit; we'll stop early if needed.
+    crawler = create_stealth_crawler(max_requests=50)
 
     @crawler.router.default_handler
     async def handler(context: PlaywrightCrawlingContext) -> None:  # pyright: ignore[reportUnusedFunction]
@@ -73,24 +76,24 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
         # Wait for the tender table to load
         await page.wait_for_load_state("networkidle", timeout=15000)
 
-        # goszakupki.by renders tenders in a table; each row is a tender
-        # The main content table has rows with tender data
-        rows = await page.query_selector_all("table.table tbody tr")
+        # goszakupki.by uses a Yii2 GridView with id="tenders-grid".
+        # The table inside has class "table table-striped table-bordered".
+        grid = await page.query_selector("#tenders-grid")
+        if grid is None:
+            # Fallback: try any table
+            grid = await page.query_selector("table.table")
 
-        if not rows:
-            # Try alternative selector — the site sometimes uses divs
-            rows = await page.query_selector_all(".tender-item, .search-results-item")
+        if grid is None:
+            context.log.info("goszakupki.by [%s]: no results grid found", keyword)
+            return
+
+        rows = await grid.query_selector_all("tbody tr")
 
         for row in rows:
             try:
-                # Extract the link element
-                link_el = await row.query_selector("a[href*='/tenders/view/']")
-                if link_el is None:
-                    link_el = await row.query_selector("a[href*='/marketing/view/']")
-                if link_el is None:
-                    # Try any link inside the row
-                    link_el = await row.query_selector("a[href]")
-
+                # The link to the tender may use various URL patterns:
+                # /tenders/view/ID, /single-source/view/ID, /marketing/view/ID
+                link_el = await row.query_selector("a[href*='/view/']")
                 if link_el is None:
                     continue
 
@@ -104,10 +107,16 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
                 if href.startswith("/"):
                     href = f"https://goszakupki.by{href}"
 
-                # Extract tender ID from URL
+                # Extract tender ID from URL (last segment)
                 tender_id = href.rstrip("/").split("/")[-1]
 
-                # Extract other cells from the row
+                # Extract cells — goszakupki.by table structure:
+                # Cell 0: Tender number (auc0003421250)
+                # Cell 1: Organization + tender title link
+                # Cell 2: Procedure type
+                # Cell 3: Status
+                # Cell 4: Deadline (proposals/documents deadline)
+                # Cell 5: Estimated/limit price
                 cells = await row.query_selector_all("td")
                 organization = ""
                 price = ""
@@ -116,15 +125,20 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
                 tender_type = ""
 
                 if len(cells) >= 2:
-                    organization = (await cells[1].inner_text()).strip()
+                    # Cell 1 contains org name + link; get org from first text
+                    full_text = (await cells[1].inner_text()).strip()
+                    # Organization is usually before the tender title
+                    text_parts = [p.strip() for p in full_text.split("\n") if p.strip()]
+                    if len(text_parts) >= 2:
+                        organization = text_parts[0]
+                if len(cells) >= 3:
+                    tender_type = (await cells[2].inner_text()).strip()
                 if len(cells) >= 4:
-                    tender_type = (await cells[3].inner_text()).strip()
+                    status = (await cells[3].inner_text()).strip()
                 if len(cells) >= 5:
-                    status = (await cells[4].inner_text()).strip()
+                    deadline = (await cells[4].inner_text()).strip()
                 if len(cells) >= 6:
-                    deadline = (await cells[5].inner_text()).strip()
-                if len(cells) >= 7:
-                    price = (await cells[6].inner_text()).strip()
+                    price = (await cells[5].inner_text()).strip()
 
                 tenders.append(
                     TenderItem(
@@ -134,6 +148,7 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
                         url=href,
                         organization=organization,
                         price=price,
+                        max_price=price,  # from list page, price IS the limit price
                         deadline=deadline,
                         status=status,
                         tender_type=tender_type,
@@ -144,7 +159,7 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
                 continue
 
         context.log.info(
-            "goszakupki.by [%s]: parsed %d tenders", keyword, len(tenders)
+            "goszakupki.by [%s]: parsed %d tenders from list", keyword, len(tenders)
         )
 
     try:
@@ -152,4 +167,59 @@ async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
     except Exception:
         logger.exception("Failed to crawl goszakupki.by for keyword '%s'", keyword)
 
+    # Now enrich each tender with detail page data.
+    # Use a separate crawler for detail pages to avoid queue conflicts.
+    if tenders:
+        await _enrich_tenders_from_details(tenders)
+
     return tenders
+
+
+async def _enrich_tenders_from_details(tenders: list[TenderItem]) -> None:
+    """Visit each tender's detail page to extract additional fields."""
+    detail_crawler = create_stealth_crawler(max_requests=len(tenders) + 1)
+    # Map URL → tender for updating after crawl
+    url_to_tender: dict[str, TenderItem] = {t.url: t for t in tenders}
+    detail_urls = list(url_to_tender.keys())
+
+    @detail_crawler.router.default_handler
+    async def detail_handler(context: PlaywrightCrawlingContext) -> None:  # pyright: ignore[reportUnusedFunction]
+        page = context.page
+        current_url = page.url
+        await page.wait_for_load_state("networkidle", timeout=15000)
+
+        tender = url_to_tender.get(current_url)
+        if tender is None:
+            # Try matching by tender_id in URL
+            for _t_url, t_obj in url_to_tender.items():
+                if t_obj.tender_id in current_url:
+                    tender = t_obj
+                    break
+        if tender is None:
+            return
+
+        # Scan all table rows for label-value pairs
+        rows = await page.query_selector_all("table tr")
+        for row in rows:
+            cells = await row.query_selector_all("td, th")
+            if len(cells) < 2:
+                continue
+            label = (await cells[0].inner_text()).strip().lower()
+            value = (await cells[1].inner_text()).strip()
+            if not value:
+                continue
+
+            if "предельная стоимость" in label or "ориентировочная стоимость" in label:
+                tender.max_price = value
+            elif "дата размещения" in label:
+                tender.published_at = value
+            elif any(
+                kw in label
+                for kw in ("срок поставки", "срок выполнения", "срок производства", "срок оказания")
+            ):
+                tender.work_period = value
+
+    try:
+        await detail_crawler.run(detail_urls)
+    except Exception:
+        logger.exception("Failed to enrich goszakupki tenders from detail pages")
