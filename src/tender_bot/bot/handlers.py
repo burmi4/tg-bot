@@ -10,17 +10,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, Message
 
-from tender_bot.bot.keyboards import (
-    block_words_keyboard,
-    keywords_keyboard,
-    main_menu_keyboard,
-)
+from tender_bot.bot.keyboards import keywords_keyboard, main_menu_keyboard
 from tender_bot.config import settings
 from tender_bot.db import (
-    get_user_block_words,
     get_user_keywords,
     register_user,
-    set_user_block_words,
     set_user_enabled,
     set_user_keywords,
 )
@@ -38,12 +32,6 @@ class AddKeywordState(StatesGroup):
     """FSM for waiting for a new keyword input."""
 
     waiting_for_keyword = State()
-
-
-class AddBlockWordState(StatesGroup):
-    """FSM for waiting for a new block-word input."""
-
-    waiting_for_block_word = State()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -89,7 +77,6 @@ async def cmd_start(message: Message) -> None:
     chat_id = message.chat.id
     await register_user(chat_id)
     keywords = await get_user_keywords(chat_id)
-    block_words = await get_user_block_words(chat_id)
 
     welcome = (
         "👋 <b>Добро пожаловать в бот мониторинга тендеров!</b>\n\n"
@@ -98,8 +85,6 @@ async def cmd_start(message: Message) -> None:
         "• <b>icetrade.by</b>\n\n"
         f"🔑 <b>Ключевые слова для поиска:</b>\n"
         f"{', '.join(keywords)}\n\n"
-        f"🚫 <b>Блок-слова (фильтрация):</b>\n"
-        f"{', '.join(block_words) if block_words else '(нет)'}\n\n"
         f"⏱ Интервал проверки: каждые {settings.poll_interval_seconds} сек.\n\n"
         "Используйте меню ниже для настройки:"
     )
@@ -199,99 +184,6 @@ async def cmd_remove_keyword(message: Message) -> None:
     )
 
 
-# ── /blockwords ──────────────────────────────────────────────────────────────
-
-
-@router.message(Command("blockwords"))
-async def cmd_block_words(message: Message) -> None:
-    """Show current block words with management keyboard."""
-    chat_id = message.chat.id
-    block_words = await get_user_block_words(chat_id)
-
-    if not block_words:
-        text = "🚫 У вас нет блок-слов. Добавьте через кнопку ниже."
-    else:
-        text = (
-            "🚫 <b>Ваши блок-слова:</b>\n\n"
-            "Тендеры, содержащие эти слова в заголовке, "
-            "<b>не будут</b> отправляться:\n\n"
-            + "\n".join(f"  • {bw}" for bw in block_words)
-            + "\n\nНажмите 🗑 чтобы удалить:"
-        )
-
-    await message.answer(
-        text, parse_mode="HTML", reply_markup=block_words_keyboard(block_words)
-    )
-
-
-# ── /addblock <word> ─────────────────────────────────────────────────────────
-
-
-@router.message(Command("addblock"))
-async def cmd_add_block_word(message: Message) -> None:
-    """Add a block word: /addblock детального обследования."""
-    chat_id = message.chat.id
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
-
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer(
-            "⚠️ Укажите блок-слово после команды.\n"
-            "Пример: <code>/addblock детального обследования</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    new_bw = parts[1].strip()
-    block_words = await get_user_block_words(chat_id)
-
-    if new_bw in block_words:
-        await message.answer(f"ℹ️ Блок-слово «{new_bw}» уже есть в списке.")
-        return
-
-    block_words.append(new_bw)
-    await set_user_block_words(chat_id, block_words)
-    await message.answer(
-        f"✅ Блок-слово добавлено: <b>{new_bw}</b>\n\n"
-        f"Текущие блок-слова: {', '.join(block_words)}",
-        parse_mode="HTML",
-    )
-
-
-# ── /removeblock <word> ──────────────────────────────────────────────────────
-
-
-@router.message(Command("removeblock"))
-async def cmd_remove_block_word(message: Message) -> None:
-    """Remove a block word: /removeblock детального обследования."""
-    chat_id = message.chat.id
-    text = (message.text or "").strip()
-    parts = text.split(maxsplit=1)
-
-    if len(parts) < 2 or not parts[1].strip():
-        await message.answer(
-            "⚠️ Укажите блок-слово для удаления.\n"
-            "Пример: <code>/removeblock детального обследования</code>",
-            parse_mode="HTML",
-        )
-        return
-
-    rm_bw = parts[1].strip()
-    block_words = await get_user_block_words(chat_id)
-
-    if rm_bw not in block_words:
-        await message.answer(f"ℹ️ Блок-слово «{rm_bw}» не найдено в списке.")
-        return
-
-    block_words.remove(rm_bw)
-    await set_user_block_words(chat_id, block_words)
-    await message.answer(
-        f"🗑 Удалено: <b>{rm_bw}</b>\n\n"
-        f"Текущие блок-слова: {', '.join(block_words) if block_words else '(пусто)'}",
-        parse_mode="HTML",
-    )
-
-
 # ── /status ──────────────────────────────────────────────────────────────────
 
 
@@ -305,7 +197,6 @@ async def cmd_status(message: Message) -> None:
 
     chat_id = message.chat.id
     keywords = await get_user_keywords(chat_id)
-    block_words = await get_user_block_words(chat_id)
 
     status_text = (
         "📊 <b>Статус бота</b>\n\n"
@@ -314,8 +205,7 @@ async def cmd_status(message: Message) -> None:
         f"🔍 Найдено тендеров: {found}\n"
         f"📨 Отправлено новых: {sent}\n"
         f"❌ Ошибок: {errors}\n\n"
-        f"🔑 Ваши ключевые слова:\n{', '.join(keywords)}\n\n"
-        f"🚫 Ваши блок-слова:\n{', '.join(block_words) if block_words else '(нет)'}"
+        f"🔑 Ваши ключевые слова:\n{', '.join(keywords)}"
     )
     await message.answer(status_text, parse_mode="HTML")
 
@@ -349,16 +239,10 @@ async def cmd_help(message: Message) -> None:
         "/keywords — Показать ключевые слова\n"
         "/add <i>слово</i> — Добавить ключевое слово\n"
         "/remove <i>слово</i> — Удалить ключевое слово\n"
-        "/blockwords — Показать блок-слова\n"
-        "/addblock <i>фраза</i> — Добавить блок-слово\n"
-        "/removeblock <i>фраза</i> — Удалить блок-слово\n"
         "/status — Статус бота\n"
         "/stop — Приостановить уведомления\n"
         "/resume — Возобновить уведомления\n"
-        "/help — Эта справка\n\n"
-        "💡 <b>Блок-слова</b> — тендеры, содержащие эти фразы "
-        "в названии, автоматически фильтруются и <b>не</b> "
-        "отправляются вам."
+        "/help — Эта справка"
     )
     await message.answer(help_text, parse_mode="HTML")
 
@@ -384,34 +268,6 @@ async def cb_show_keywords(callback: CallbackQuery) -> None:
     )
     await msg.edit_text(
         text, parse_mode="HTML", reply_markup=keywords_keyboard(keywords)
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "show_block_words")
-async def cb_show_block_words(callback: CallbackQuery) -> None:
-    """Show block words via inline button."""
-    msg = _get_callback_message(callback)
-    if msg is None:
-        await callback.answer()
-        return
-
-    chat_id = msg.chat.id
-    block_words = await get_user_block_words(chat_id)
-
-    if not block_words:
-        text = "🚫 У вас нет блок-слов. Добавьте через кнопку ниже."
-    else:
-        text = (
-            "🚫 <b>Ваши блок-слова:</b>\n\n"
-            "Тендеры, содержащие эти слова в заголовке, "
-            "<b>не будут</b> отправляться:\n\n"
-            + "\n".join(f"  • {bw}" for bw in block_words)
-            + "\n\nНажмите 🗑 чтобы удалить:"
-        )
-
-    await msg.edit_text(
-        text, parse_mode="HTML", reply_markup=block_words_keyboard(block_words)
     )
     await callback.answer()
 
@@ -466,44 +322,6 @@ async def cb_remove_keyword(callback: CallbackQuery) -> None:
     await callback.answer(f"Удалено: {kw}")
 
 
-@router.callback_query(F.data.startswith("rm_bw:"))
-async def cb_remove_block_word(callback: CallbackQuery) -> None:
-    """Remove a block word via inline button."""
-    msg = _get_callback_message(callback)
-    if msg is None or callback.data is None:
-        await callback.answer()
-        return
-
-    bw_prefix = callback.data.removeprefix("rm_bw:")
-    chat_id = msg.chat.id
-    block_words = await get_user_block_words(chat_id)
-
-    # Find the block word that starts with this prefix (callback_data truncated)
-    removed = ""
-    for bw in block_words:
-        if bw.startswith(bw_prefix) or bw_prefix.startswith(bw):
-            removed = bw
-            block_words.remove(bw)
-            await set_user_block_words(chat_id, block_words)
-            break
-
-    text = (
-        "🚫 <b>Ваши блок-слова:</b>\n\n"
-        + (
-            "\n".join(f"  • {b}" for b in block_words)
-            if block_words
-            else "  (пусто)"
-        )
-    )
-    if removed:
-        text += f"\n\n🗑 Удалено: {removed}"
-
-    await msg.edit_text(
-        text, parse_mode="HTML", reply_markup=block_words_keyboard(block_words)
-    )
-    await callback.answer(f"Удалено: {removed}" if removed else "")
-
-
 @router.callback_query(F.data == "add_kw")
 async def cb_add_keyword_prompt(callback: CallbackQuery, state: FSMContext) -> None:
     """Prompt user to type a new keyword."""
@@ -515,24 +333,6 @@ async def cb_add_keyword_prompt(callback: CallbackQuery, state: FSMContext) -> N
     await state.set_state(AddKeywordState.waiting_for_keyword)
     await msg.edit_text(
         "✏️ Введите новое ключевое слово для поиска:",
-        parse_mode="HTML",
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "add_bw")
-async def cb_add_block_word_prompt(callback: CallbackQuery, state: FSMContext) -> None:
-    """Prompt user to type a new block word."""
-    msg = _get_callback_message(callback)
-    if msg is None:
-        await callback.answer()
-        return
-
-    await state.set_state(AddBlockWordState.waiting_for_block_word)
-    await msg.edit_text(
-        "✏️ Введите новое блок-слово.\n\n"
-        "Тендеры, содержащие это слово/фразу в названии, "
-        "не будут вам отправляться:",
         parse_mode="HTML",
     )
     await callback.answer()
@@ -559,32 +359,6 @@ async def handle_new_keyword(message: Message, state: FSMContext) -> None:
             f"Текущие слова: {', '.join(keywords)}",
             parse_mode="HTML",
             reply_markup=keywords_keyboard(keywords),
-        )
-
-    await state.clear()
-
-
-@router.message(AddBlockWordState.waiting_for_block_word)
-async def handle_new_block_word(message: Message, state: FSMContext) -> None:
-    """Receive the new block word typed by the user."""
-    new_bw = (message.text or "").strip()
-    if not new_bw:
-        await message.answer("⚠️ Введите непустое блок-слово.")
-        return
-
-    chat_id = message.chat.id
-    block_words = await get_user_block_words(chat_id)
-
-    if new_bw in block_words:
-        await message.answer(f"ℹ️ Блок-слово «{new_bw}» уже есть в списке.")
-    else:
-        block_words.append(new_bw)
-        await set_user_block_words(chat_id, block_words)
-        await message.answer(
-            f"✅ Блок-слово добавлено: <b>{new_bw}</b>\n\n"
-            f"Текущие блок-слова: {', '.join(block_words)}",
-            parse_mode="HTML",
-            reply_markup=block_words_keyboard(block_words),
         )
 
     await state.clear()

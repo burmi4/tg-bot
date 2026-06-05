@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import time
 from urllib.parse import quote, urlencode
 
+from crawlee import Request
 from crawlee.crawlers import PlaywrightCrawlingContext
-from playwright.async_api import ElementHandle, Page
 
 from tender_bot.models import TenderItem
 from tender_bot.scrapers.base import create_stealth_crawler
@@ -50,6 +51,7 @@ def _build_search_url(keyword: str) -> str:
         "r[5]": "5",
         "sort": "num:desc",
         "onPage": "20",
+        "_t": str(time.time()),
     }
     return f"{_BASE_URL}?{urlencode(params, quote_via=quote)}"
 
@@ -73,189 +75,152 @@ async def scrape_icetrade(keywords: list[str]) -> list[TenderItem]:
     return result
 
 
+
 async def _scrape_single_keyword(url: str, keyword: str) -> list[TenderItem]:
     """Scrape a single search results page from icetrade.by."""
     tenders: list[TenderItem] = []
-    crawler = create_stealth_crawler(max_requests=1)
+    crawler = create_stealth_crawler()
 
-    @crawler.router.default_handler
+    @crawler.router.default_handler  # pyright: ignore[reportUnknownMemberType]
     async def handler(context: PlaywrightCrawlingContext) -> None:  # pyright: ignore[reportUnusedFunction]
         page = context.page
-        await page.wait_for_load_state("networkidle", timeout=15000)
+        try:
+            await page.wait_for_selector(
+                "table.auctions-table tbody tr, a[href*='/tenders/all/view/']",
+                timeout=15000,
+            )
+        except Exception:
+            logger.debug("Timeout waiting for icetrade results, continuing to parse.")
 
-        # icetrade.by shows results in a table or as a list of links
-        # Each tender is a link to /tenders/all/view/XXXXXX
         rows = await page.query_selector_all("table.auctions-table tbody tr")
-
         if rows:
-            await _parse_table_rows(rows, tenders)
-        else:
-            # Fallback: parse links directly from the page content
-            await _parse_link_list(page, tenders)
+            for row in rows:
+                try:
+                    link_el = await row.query_selector("a[href*='/tenders/all/view/']")
+                    if link_el is None:
+                        continue
 
-        context.log.info(
-            "icetrade.by [%s]: parsed %d tenders", keyword, len(tenders)
-        )
+                    title = (await link_el.inner_text()).strip()
+                    href = await link_el.get_attribute("href") or ""
+
+                    if not title or not href:
+                        continue
+
+                    if href.startswith("/"):
+                        href = f"https://icetrade.by{href}"
+
+                    tender_id = href.rstrip("/").split("/")[-1]
+
+                    cells = await row.query_selector_all("td")
+                    organization = ""
+                    if len(cells) >= 3:
+                        organization = (await cells[2].inner_text()).strip()
+
+                    await context.add_requests([
+                        Request.from_url(
+                            href,
+                            label="DETAIL",
+                            user_data={
+                                "tender_id": tender_id,
+                                "title": title,
+                                "url": href,
+                                "organization": organization,
+                            }
+                        )
+                    ])
+                except Exception:
+                    logger.exception("Error parsing icetrade table row")
+        else:
+            links = await page.query_selector_all("a[href*='/tenders/all/view/']")
+            for link in links:
+                try:
+                    title = (await link.inner_text()).strip()
+                    href = await link.get_attribute("href") or ""
+
+                    if not title or not href:
+                        continue
+
+                    if href.startswith("/"):
+                        href = f"https://icetrade.by{href}"
+
+                    tender_id = href.rstrip("/").split("/")[-1]
+                    parent = await link.evaluate_handle(
+                        "el => el.closest('tr') || el.parentElement"
+                    )
+                    organization = ""
+                    if parent:
+                        full_text: str = await parent.evaluate("el => el.textContent || ''")
+                        parts = [p.strip() for p in full_text.split("\n") if p.strip()]
+                        if len(parts) >= 2:
+                            for part in parts:
+                                if part != title and len(part) > 5:
+                                    organization = part
+                                    break
+
+                    await context.add_requests([
+                        Request.from_url(
+                            href,
+                            label="DETAIL",
+                            user_data={
+                                "tender_id": tender_id,
+                                "title": title,
+                                "url": href,
+                                "organization": organization,
+                            }
+                        )
+                    ])
+                except Exception:
+                    logger.exception("Error parsing icetrade link")
+
+        context.log.info("icetrade.by [%s]: queued detail pages", keyword)
+
+
+    @crawler.router.handler("DETAIL")  # pyright: ignore[reportUnknownMemberType]
+    async def detail_handler(context: PlaywrightCrawlingContext) -> None:  # pyright: ignore[reportUnusedFunction]
+        page = context.page
+        user_data = context.request.user_data
+
+        max_cost = "Не указана"
+        publish_period = ""
+        submission_deadline = ""
+        execution_period = ""
+
+        try:
+            trs = await page.query_selector_all("tr")
+            for tr in trs:
+                th = await tr.query_selector("th")
+                td = await tr.query_selector("td")
+                if th and td:
+                    th_text = (await th.inner_text()).strip()
+                    td_text = (await td.inner_text()).strip()
+
+                    if "Общая ориентировочная стоимость" in th_text:
+                        max_cost = td_text
+                    elif "Дата размещения" in th_text:
+                        publish_period = td_text
+                    elif "окончания приема предложений" in th_text:
+                        submission_deadline = td_text
+                    elif "Срок поставки" in th_text or "Срок производства" in th_text:
+                        execution_period = td_text
+
+            item = TenderItem(
+                source="icetrade",
+                tender_id=str(user_data.get("tender_id", "")),
+                title=str(user_data.get("title", "")),
+                url=str(user_data.get("url", "")),
+                organization=str(user_data.get("organization", "")),
+                max_cost=max_cost,
+                publish_period=publish_period,
+                submission_deadline=submission_deadline,
+                execution_period=execution_period,
+            )
+            tenders.append(item)
+        except Exception:
+            logger.exception("Error parsing icetrade detail page %s", context.request.url)
 
     try:
         await crawler.run([url])
     except Exception:
         logger.exception("Failed to crawl icetrade.by for keyword '%s'", keyword)
 
-    # Enrich with detail page data
-    if tenders:
-        await _enrich_tenders_from_details(tenders)
-
     return tenders
-
-
-async def _parse_table_rows(
-    rows: list[ElementHandle],
-    tenders: list[TenderItem],
-) -> None:
-    """Parse tender data from table rows."""
-    for row in rows:
-        try:
-            link_el = await row.query_selector("a[href*='/tenders/all/view/']")
-            if link_el is None:
-                continue
-
-            title = (await link_el.inner_text()).strip()
-            href = await link_el.get_attribute("href") or ""
-
-            if not title or not href:
-                continue
-
-            if href.startswith("/"):
-                href = f"https://icetrade.by{href}"
-
-            tender_id = href.rstrip("/").split("/")[-1]
-
-            cells = await row.query_selector_all("td")
-            organization = ""
-            deadline = ""
-
-            if len(cells) >= 3:
-                organization = (await cells[2].inner_text()).strip()
-            if len(cells) >= 5:
-                deadline = (await cells[4].inner_text()).strip()
-
-            tenders.append(
-                TenderItem(
-                    source="icetrade",
-                    tender_id=tender_id,
-                    title=title,
-                    url=href,
-                    organization=organization,
-                    deadline=deadline,
-                )
-            )
-        except Exception:
-            logger.exception("Error parsing icetrade table row")
-            continue
-
-
-async def _parse_link_list(
-    page: Page,
-    tenders: list[TenderItem],
-) -> None:
-    """Fallback parser: extract tender links directly from the page."""
-    links = await page.query_selector_all("a[href*='/tenders/all/view/']")
-
-    for link in links:
-        try:
-            title = (await link.inner_text()).strip()
-            href = await link.get_attribute("href") or ""
-
-            if not title or not href:
-                continue
-
-            if href.startswith("/"):
-                href = f"https://icetrade.by{href}"
-
-            tender_id = href.rstrip("/").split("/")[-1]
-
-            # Try to get the parent row/container for extra details
-            parent = await link.evaluate_handle("el => el.closest('tr') || el.parentElement")
-            organization = ""
-            if parent:
-                full_text: str = await parent.evaluate("el => el.textContent || ''")
-                parts = [p.strip() for p in full_text.split("\n") if p.strip()]
-                if len(parts) >= 2:
-                    for part in parts:
-                        if part != title and len(part) > 5:
-                            organization = part
-                            break
-
-            tenders.append(
-                TenderItem(
-                    source="icetrade",
-                    tender_id=tender_id,
-                    title=title,
-                    url=href,
-                    organization=organization,
-                )
-            )
-        except Exception:
-            logger.exception("Error parsing icetrade link")
-            continue
-
-
-async def _enrich_tenders_from_details(tenders: list[TenderItem]) -> None:
-    """Visit each tender's detail page to extract max_price, published_at, work_period."""
-    detail_crawler = create_stealth_crawler(max_requests=len(tenders) + 1)
-    url_to_tender: dict[str, TenderItem] = {t.url: t for t in tenders}
-    detail_urls = list(url_to_tender.keys())
-
-    @detail_crawler.router.default_handler
-    async def detail_handler(context: PlaywrightCrawlingContext) -> None:  # pyright: ignore[reportUnusedFunction]
-        page = context.page
-        current_url = page.url
-        await page.wait_for_load_state("networkidle", timeout=15000)
-
-        tender = url_to_tender.get(current_url)
-        if tender is None:
-            # Try matching by tender_id in URL
-            for _t_url, t_obj in url_to_tender.items():
-                if t_obj.tender_id in current_url:
-                    tender = t_obj
-                    break
-        if tender is None:
-            return
-
-        # icetrade.by detail page structure:
-        # - Table #main-info has main fields (org, dates, prices)
-        # - Table #lots-info has lot-specific fields (delivery period)
-        # We scan all rows for label-value pairs.
-        rows = await page.query_selector_all("table tr")
-        for row in rows:
-            cells = await row.query_selector_all("td, th")
-            if len(cells) < 2:
-                continue
-            label = (await cells[0].inner_text()).strip().lower()
-            value = (await cells[1].inner_text()).strip()
-            if not value:
-                continue
-
-            if "ориентировочная стоимость" in label or "предельная стоимость" in label:
-                tender.max_price = value
-            elif "дата размещения" in label and not tender.published_at:
-                tender.published_at = value
-            elif "окончания приема" in label and not tender.deadline:
-                tender.deadline = value
-            elif (
-                not tender.work_period
-                and any(
-                    kw in label
-                    for kw in (
-                        "срок поставки", "срок выполнения",
-                        "срок производства", "срок оказания",
-                    )
-                )
-            ):
-                tender.work_period = value
-
-    try:
-        await detail_crawler.run(detail_urls)
-    except Exception:
-        logger.exception("Failed to enrich icetrade tenders from detail pages")

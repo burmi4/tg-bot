@@ -33,6 +33,18 @@ class Settings:
             if kw.strip()
         ]
     )
+    stop_words: list[str] = field(
+        default_factory=lambda: [
+            kw.strip()
+            for kw in os.getenv(
+                "STOP_WORDS",
+                "детального обследования,"
+                "Разработка предпроектной и проектной,"
+                "предпроектной (предынвестиционной",
+            ).split(",")
+            if kw.strip()
+        ]
+    )
     poll_interval_seconds: int = field(
         default_factory=lambda: int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
     )
